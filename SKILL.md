@@ -116,14 +116,18 @@ scripts/
 
 ### 服务器运维
 
-> **优先级策略**：运维操作优先使用 ops 脚本（SSH + 密码直连执行），ops目录不存在的脚本，考虑结合需求场景生成脚本然后执行，仅在脚本无法满足需求时才使用 tccli 接口调用。
+> **优先级策略**：运维操作优先使用 ops 脚本（SSH + 密码直连执行），仅在脚本无法满足需求时才使用 tccli 接口调用。
+>
+> **安全限制**：ops 目录仅使用已有的预定义脚本，不支持动态生成新脚本。
+>
+> **重要原则**：运维写操作（如停止、重启、销毁实例，服务管理，文件传输等）需要人工确认后执行。
 >
 > 所有运维脚本只需 `--instance-id` 即可自动获取密码和 IP
 
 | 脚本 | 功能 | 特殊参数 |
 |------|------|----------|
 | `ssh-connect.sh` | SSH 连接 | `--port` |
-| `remote-exec.sh` | 远程命令 | `--cmd <command>` |
+| `remote-exec.sh` | 远程命令（仅支持预定义安全命令） | `--cmd <command>` |
 | `system-info.sh` | 系统信息 | - |
 | `disk-usage.sh` | 磁盘检查 | `--threshold <n>` |
 | `process-monitor.sh` | 进程监控 | `--top <n>`, `--filter` |
@@ -132,6 +136,61 @@ scripts/
 | `security-check.sh` | 安全检查 | - |
 | `file-transfer.sh` | 文件传输 | `--upload/--download`, `--local`, `--remote` |
 | `network-check.sh` | 网络检查 | `--target` |
+
+#### remote-exec 安全命令集
+
+`remote-exec.sh` 仅支持以下预定义的只读命令或 ops 目录下的脚本：
+
+| 分类 | 命令 | 用途 |
+|------|------|------|
+| **系统信息** | `uptime` | 系统运行时间和负载 |
+| | `uname -a` | 内核和系统信息 |
+| | `hostname` | 主机名 |
+| | `cat /etc/os-release` | 操作系统版本 |
+| | `date` | 系统时间 |
+| | `timedatectl` | 时区和时间同步状态 |
+| **CPU** | `cat /proc/loadavg` | 系统负载 |
+| | `top -bn1 \| head -20` | CPU 和进程概览 |
+| | `mpstat` | CPU 使用统计 |
+| | `nproc` | CPU 核数 |
+| | `lscpu` | CPU 详细信息 |
+| **内存** | `free -h` | 内存使用情况 |
+| | `cat /proc/meminfo` | 内存详细信息 |
+| | `vmstat` | 虚拟内存统计 |
+| **磁盘** | `df -h` | 磁盘使用情况 |
+| | `df -i` | inode 使用情况 |
+| | `lsblk` | 块设备列表 |
+| | `fdisk -l` | 磁盘分区信息 |
+| | `du -sh <path>` | 目录大小 |
+| **进程** | `ps aux` | 进程列表 |
+| | `ps aux \| head -20` | 前 20 个进程 |
+| | `pgrep <name>` | 按名称查找进程 |
+| | `pidof <name>` | 获取进程 PID |
+| **网络** | `ip addr` | 网络接口信息 |
+| | `ip route` | 路由表 |
+| | `netstat -tlnp` | TCP 端口监听 |
+| | `ss -tlnp` | 套接字统计 |
+| | `ping -c 4 <host>` | 网络连通性测试 |
+| | `curl -I <url>` | HTTP 头信息 |
+| | `dig <domain>` | DNS 解析 |
+| | `traceroute <host>` | 路由追踪 |
+| **服务** | `systemctl status <service>` | 服务状态 |
+| | `systemctl is-active <service>` | 服务是否运行 |
+| | `systemctl list-units --type=service` | 服务列表 |
+| **日志** | `tail -n 100 <logfile>` | 查看日志末尾 |
+| | `head -n 100 <logfile>` | 查看日志开头 |
+| | `journalctl -u <service> -n 100` | 服务日志 |
+| | `dmesg \| tail -50` | 内核日志 |
+| **安全** | `who` | 当前登录用户 |
+| | `w` | 用户活动 |
+| | `last -n 20` | 登录历史 |
+| | `cat /etc/passwd` | 用户列表 |
+| | `cat /etc/group` | 用户组列表 |
+| **其他** | `env` | 环境变量 |
+| | `crontab -l` | 定时任务列表 |
+| | `docker ps` | Docker 容器列表 |
+| | `docker images` | Docker 镜像列表 |
+| | `scripts/ops/*.sh` | ops 目录下的预定义运维脚本 |
 
 ### 辅助工具
 
@@ -196,6 +255,16 @@ scripts/
 ./scripts/utils/manage-passwords.sh --show ins-xxx      # 查看详情
 ./scripts/utils/manage-passwords.sh --delete ins-xxx    # 删除记录
 ```
+
+## 安全说明
+
+本工具集设计用于可信环境下的服务器运维，遵循以下安全原则：
+
+1. **预定义脚本**：仅执行 `scripts/` 目录下已审核的预定义脚本，禁止动态生成或执行任意代码
+2. **人工确认**：所有写操作（停止、重启、销毁、文件传输等）必须经人工确认后执行
+3. **凭证安全**：密码文件 `~/.tencent_cvm_passwords` 权限为 600，仅限本地用户访问
+4. **操作审计**：所有操作均有日志输出，便于追溯
+5. **使用场景**：适用于开发测试环境，生产环境建议配合堡垒机使用
 
 ## 参考
 
