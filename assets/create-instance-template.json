@@ -19,7 +19,7 @@
   ],
   "VirtualPrivateCloud": {
     "VpcId": "vpc-xxx",
-    "SubnetId": "subnet-xxx"knot
+    "SubnetId": "subnet-xxx"
   },
   "SecurityGroupIds": [
     "sg-xxx"
