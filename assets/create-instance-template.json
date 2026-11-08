@@ -1,35 +1,17 @@
 {
   "Region": "ap-guangzhou",
-  "Placement": {
-    "Zone": "ap-guangzhou-3"
-  },
+  "Placement": {"Zone": "ap-guangzhou-3"},
   "InstanceType": "S5.MEDIUM2",
-  "ImageId": "img-xxx",
+  "ImageId": "img-REPLACE",
   "InstanceName": "my-cvm-instance",
   "InstanceChargeType": "POSTPAID_BY_HOUR",
-  "SystemDisk": {
-    "DiskType": "CLOUD_PREMIUM",
-    "DiskSize": 20
-  },
-  "DataDisks": [
-    {
-      "DiskType": "CLOUD_PREMIUM",
-      "DiskSize": 50
-    }
-  ],
-  "VirtualPrivateCloud": {
-    "VpcId": "vpc-xxx",
-    "SubnetId": "subnet-xxx"
-  },
-  "SecurityGroupIds": [
-    "sg-xxx"
-  ],
+  "SystemDisk": {"DiskType": "CLOUD_PREMIUM", "DiskSize": 20},
+  "VirtualPrivateCloud": {"VpcId": "vpc-REPLACE", "SubnetId": "subnet-REPLACE"},
+  "SecurityGroupIds": ["sg-REPLACE"],
   "InternetAccessible": {
     "InternetChargeType": "TRAFFIC_POSTPAID_BY_HOUR",
-    "InternetMaxBandwidthOut": 10,
-    "PublicIpAssigned": true
+    "InternetMaxBandwidthOut": 0,
+    "PublicIpAssigned": false
   },
-  "LoginSettings": {
-    "Password": "YourPassword123!"
-  }
+  "LoginSettings": {"KeyIds": ["skey-REPLACE"]}
 }

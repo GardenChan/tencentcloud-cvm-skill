@@ -1,45 +1,41 @@
 #!/bin/bash
-# reboot-instance.sh - 重启腾讯云 CVM 实例
-
+set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../common.sh"
-
-show_help() {
-    print_help_header "reboot-instance.sh" "重启腾讯云 CVM 实例"
-    cat <<EOF
-  --instance-id <id>      实例 ID（必需）
-  --region <region>       地域
-  --force                 强制重启
-  -h, --help              显示帮助
-
-示例:
-  $0 --instance-id ins-xxx
-
-EOF
-}
-
-check_api_prerequisites
+source "$SCRIPT_DIR/lifecycle-common.sh"
 load_defaults
-
-INSTANCE_ID="" FORCE=false
-
+INSTANCE_ID="" ASSUME_YES=false WAIT=false TIMEOUT=300 FORCE=false STOPPED_MODE=KEEP_CHARGING
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        --instance-id) INSTANCE_ID="$2"; shift 2 ;;
-        --region)      REGION="$2"; shift 2 ;;
-        --force)       FORCE=true; shift ;;
-        -h|--help)     show_help; exit 0 ;;
-        *)             error "未知参数: $1"; exit 1 ;;
+    case "$1" in
+        --instance-id) lc_value "$@"; INSTANCE_ID="$2"; shift 2 ;;
+        --region) lc_value "$@"; REGION="$2"; shift 2 ;;
+        --yes) ASSUME_YES=true; shift ;;
+        --wait) WAIT=true; shift ;;
+        --timeout) lc_value "$@"; TIMEOUT="$2"; shift 2 ;;
+        --force) FORCE=true; shift ;;
+        -h|--help)
+            cat <<'HELP'
+用法: reboot-instance.sh --instance-id <id> [--region <region>] [--yes] [--wait] [--timeout 300]
+重启实例（中断业务）。--yes 表示已经批准本次操作；否则先展示目标并确认一次。
+  --force 直接强制断电/重启，可能损坏数据；默认仅软操作
+HELP
+            exit 0 ;;
+        *) error "未知参数: $1"; exit 2 ;;
     esac
 done
-
-[[ -z "$INSTANCE_ID" ]] && { error "缺少: --instance-id"; exit 1; }
+lc_instance "$INSTANCE_ID"
+[[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { error "--timeout 需要正整数"; exit 2; }
+check_api_prerequisites
 validate_region "$REGION"
+ids=$(jq -cn --arg id "$INSTANCE_ID" '[$id]')
+ARGS=(--region "$REGION" --InstanceIds "$ids")
 
-STOP_TYPE="SOFT_FIRST"
-[[ "$FORCE" == "true" ]] && STOP_TYPE="HARD"
+STOP_TYPE=SOFT
+[[ "$FORCE" == true ]] && STOP_TYPE=HARD
+ARGS+=(--StopType "$STOP_TYPE")
 
-info "重启实例 $INSTANCE_ID ..."
-execute_tccli cvm RebootInstances --region "$REGION" --InstanceIds "[\"$INSTANCE_ID\"]" --StopType "$STOP_TYPE" > /dev/null
-
-success "重启请求已发送"
+lc_confirm "确认重启实例（中断业务）？"
+result=$(execute_tccli cvm RebootInstances "${ARGS[@]}")
+success "重启实例（中断业务）请求已提交，尚未确认完成"
+printf '%s\n' "$result"
+lc_wait "$result" RUNNING

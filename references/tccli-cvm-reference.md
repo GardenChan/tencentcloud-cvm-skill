@@ -1,5 +1,9 @@
 # 腾讯云 CVM tccli 命令参考
 
+先按 [认证说明](authentication.md) 选择账号。以下示例中的资源 ID 均为占位符，调用时使用本次查询到的值，并显式传入目标 `--region` 和 `--output json`。使用 profile 时传相同 `--profile`；已有环境凭证且未选 profile 时省略该参数。直接运行 tccli 不会读取本 skill 的 `TENCENT_CVM_PROFILE`。
+
+创建、停止、重装和销毁等命令会变更资源；先核实目标、参数和用户授权，勿将参考命令当作无需确认的测试。创建请求先询价及 DryRun，结果不明时先查状态，避免重复下单。
+
 ## API 文档链接
 
 | API | 说明 | 文档链接 |
@@ -16,6 +20,7 @@
 
 - 安装指南: https://cloud.tencent.com/document/product/440/34011
 - 配置方法: https://cloud.tencent.com/document/product/440/34012
+- 浏览器授权: https://cloud.tencent.com/document/product/440/111345
 
 ## 常用命令示例
 
@@ -31,7 +36,7 @@ tccli cvm RunInstances \
   --VirtualPrivateCloud '{"VpcId":"vpc-xxx","SubnetId":"subnet-xxx"}' \
   --SecurityGroupIds '["sg-xxx"]' \
   --InstanceName my-instance \
-  --LoginSettings '{"Password":"YourPassword123!"}'
+  --LoginSettings '{"KeyIds":["skey-xxx"]}'
 ```
 
 ### 带数据盘创建
@@ -47,13 +52,13 @@ tccli cvm RunInstances \
   --VirtualPrivateCloud '{"VpcId":"vpc-xxx","SubnetId":"subnet-xxx"}' \
   --SecurityGroupIds '["sg-xxx"]' \
   --InstanceName my-instance \
-  --LoginSettings '{"Password":"YourPassword123!"}'
+  --LoginSettings '{"KeyIds":["skey-xxx"]}'
 ```
 
 ### 查询实例
 
 ```bash
-# 查询所有实例
+# 查询第一页实例；需要全部结果时按接口帮助继续分页
 tccli cvm DescribeInstances --region ap-guangzhou
 
 # 查询指定实例
@@ -100,7 +105,7 @@ tccli vpc DescribeVpcs --region ap-guangzhou
 ### 查询子网
 
 ```bash
-# 查询所有子网
+# 查询第一页子网
 tccli vpc DescribeSubnets --region ap-guangzhou
 
 # 查询指定 VPC 的子网
@@ -131,8 +136,13 @@ tccli cvm RunInstances --cli-input-json file://./create-instance.json
 ### 预检查模式
 
 ```bash
-tccli cvm RunInstances --cli-input-json file://./create-instance.json --DryRun True
+# 文件模式的 API 参数全部放进 JSON，不能再混用 --DryRun 参数。
+umask 077
+jq '.DryRun = true' create-instance.json > create-instance-dryrun.json
+tccli cvm RunInstances --cli-input-json file://./create-instance-dryrun.json
 ```
+
+成功时返回 `RequestId`，失败时返回具体错误；不要把 `DryRunOperation` 当作腾讯云成功信号。实际创建是异步操作，返回实例 ID 后还需轮询状态，不能立即宣称实例可用。参见 [RunInstances 官方文档](https://cloud.tencent.com/document/product/213/15730)。
 
 ## 参数说明
 

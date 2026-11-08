@@ -23,21 +23,18 @@ readonly DEFAULT_DATA_DISK_SIZE=50
 readonly DEFAULT_SSH_PORT=22
 readonly DEFAULT_SSH_USER="root"
 
-# 密码存储
+# 公共脚本路径；本地连接记录按 profile 隔离。
+CVM_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CVM_PASSWORD_FILE="${TENCENT_CVM_PASSWORD_FILE:-$HOME/.tencent_cvm_passwords}"
-
-# 支持的地域和平台
-readonly SUPPORTED_REGIONS=("ap-beijing" "ap-shanghai" "ap-guangzhou" "ap-chengdu" "ap-nanjing" "ap-hongkong")
-readonly SUPPORTED_PLATFORMS=("TencentOS" "CentOS" "Ubuntu" "Debian")
 
 #=============================================================================
 # 日志函数
 #=============================================================================
 
-info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
-success() { echo -e "${GREEN}[OK]${NC} $1"; }
-warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error()   { echo -e "${RED}[ERROR]${NC} $1" >&2; }
+info()    { printf '%b[INFO]%b %s\n' "$BLUE" "$NC" "$1" >&2; }
+success() { printf '%b[OK]%b %s\n' "$GREEN" "$NC" "$1" >&2; }
+warn()    { printf '%b[WARN]%b %s\n' "$YELLOW" "$NC" "$1" >&2; }
+error()   { printf '%b[ERROR]%b %s\n' "$RED" "$NC" "$1" >&2; }
 
 # 带分隔线的标题输出
 print_section() {
@@ -50,36 +47,20 @@ print_section() {
 # 依赖检查
 #=============================================================================
 
-# 检查 Python（tccli 依赖）
+# 检查生成随机密码所需的 Python 3
 check_python_installed() {
-    local python_cmd=""
-    if command -v python3 &>/dev/null; then
-        python_cmd="python3"
-    elif command -v python &>/dev/null; then
-        python_cmd="python"
-    else
-        error "Python 未安装，tccli 需要 Python 2.7+"
-        echo "安装方式: brew install python3 (macOS) | apt install python3 (Linux)"
-        exit 1
-    fi
-    
-    local version major minor
-    version=$($python_cmd -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
-    major=$(echo "$version" | cut -d. -f1)
-    minor=$(echo "$version" | cut -d. -f2)
-    
-    if [[ "$major" -lt 2 ]] || { [[ "$major" -eq 2 ]] && [[ "$minor" -lt 7 ]]; }; then
-        error "Python 版本过低: $version，需要 2.7+"
+    if ! command -v python3 &>/dev/null; then
+        error "Python 3 未安装"
+        echo "安装方式: brew install python3 (macOS) | apt install python3 (Linux)" >&2
         exit 1
     fi
 }
 
 # 检查 tccli
 check_tccli_installed() {
-    check_python_installed
     if ! command -v tccli &>/dev/null; then
         error "tccli 未安装"
-        echo "安装方式: pip install tccli"
+        echo "安装方式: python3 -m pip install --upgrade tccli" >&2
         exit 1
     fi
 }
@@ -106,49 +87,28 @@ check_sshpass_installed() {
     fi
 }
 
-# 检查腾讯云凭证
-check_credentials() {
-    [[ -z "$TENCENTCLOUD_SECRET_ID" ]] && { error "环境变量 TENCENTCLOUD_SECRET_ID 未设置"; exit 1; }
-    [[ -z "$TENCENTCLOUD_SECRET_KEY" ]] && { error "环境变量 TENCENTCLOUD_SECRET_KEY 未设置"; exit 1; }
-}
-
-# API 操作前置检查
+# 只检查依赖。凭证解析/续期交给 tccli，兼容 OAuth、SSO、环境变量和角色。
+# 不读取凭证文件，也不为每个 API 请求额外发起认证探测。
 check_api_prerequisites() {
     check_tccli_installed
     check_jq_installed
-    check_credentials
-}
-
-# SSH 操作前置检查
-check_ssh_prerequisites() {
-    check_jq_installed
-    check_sshpass_installed
 }
 
 #=============================================================================
 # 验证函数
 #=============================================================================
 
-# 验证地域
+# 只验证格式，实际支持范围以 API 为准，避免过时的地域/镜像白名单。
 validate_region() {
-    local region="$1"
-    for r in "${SUPPORTED_REGIONS[@]}"; do
-        [[ "$region" == "$r" ]] && return 0
-    done
-    error "不支持的地域: $region"
-    echo "支持的地域: ${SUPPORTED_REGIONS[*]}"
-    exit 1
+    [[ "$1" =~ ^[a-z]{2,}-[a-z0-9]+(-[a-z0-9]+)*$ ]] || { error "地域格式无效: $1"; return 2; }
 }
 
-# 验证镜像平台
 validate_platform() {
-    local platform="$1"
-    for p in "${SUPPORTED_PLATFORMS[@]}"; do
-        [[ "$platform" == "$p" ]] && return 0
-    done
-    error "不支持的平台: $platform"
-    echo "支持的平台: ${SUPPORTED_PLATFORMS[*]}"
-    exit 1
+    [[ -n "$1" && "$1" != -* && "$1" != *$'\n'* ]] || { error "镜像平台无效"; return 2; }
+}
+
+require_value() {
+    [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { error "$1 需要参数值"; return 2; }
 }
 
 #=============================================================================
@@ -169,24 +129,27 @@ load_defaults() {
     CHARGE_TYPE="${TENCENT_CVM_DEFAULT_CHARGE_TYPE:-$DEFAULT_CHARGE_TYPE}"
 }
 
-# 从 JSON 配置文件加载
+# 旧接口保留：文件中缺失的字段才沿用当前默认配置，绝不覆盖已读值。
 load_config_file() {
-    local config_file="$1"
-    [[ ! -f "$config_file" ]] && { error "配置文件不存在: $config_file"; exit 1; }
-    
-    REGION=$(jq -r '.Region // empty' "$config_file")
-    ZONE=$(jq -r '.Placement.Zone // empty' "$config_file")
-    INSTANCE_TYPE=$(jq -r '.InstanceType // empty' "$config_file")
-    IMAGE_ID=$(jq -r '.ImageId // empty' "$config_file")
-    DISK_SIZE=$(jq -r '.SystemDisk.DiskSize // empty' "$config_file")
-    DATA_DISK_SIZE=$(jq -r '.DataDisks[0].DiskSize // empty' "$config_file")
-    VPC_ID=$(jq -r '.VirtualPrivateCloud.VpcId // empty' "$config_file")
-    SUBNET_ID=$(jq -r '.VirtualPrivateCloud.SubnetId // empty' "$config_file")
-    SG_ID=$(jq -r '.SecurityGroupIds[0] // empty' "$config_file")
-    CHARGE_TYPE=$(jq -r '.InstanceChargeType // empty' "$config_file")
-    INSTANCE_NAME=$(jq -r '.InstanceName // empty' "$config_file")
-    
-    load_defaults  # 用默认值填充空值
+    local config_file="$1" key variable value
+    [[ -f "$config_file" ]] || { error "配置文件不存在: $config_file"; return 1; }
+    jq -e 'type == "object"' "$config_file" >/dev/null || return 1
+    while read -r variable key; do
+        value=$(jq -r "$key // empty" "$config_file") || return 1
+        [[ -z "$value" ]] || printf -v "$variable" '%s' "$value"
+    done <<'FIELDS'
+REGION .Region
+ZONE .Placement.Zone
+INSTANCE_TYPE .InstanceType
+IMAGE_ID .ImageId
+DISK_SIZE .SystemDisk.DiskSize
+DATA_DISK_SIZE .DataDisks[0].DiskSize
+VPC_ID .VirtualPrivateCloud.VpcId
+SUBNET_ID .VirtualPrivateCloud.SubnetId
+SG_ID .SecurityGroupIds[0]
+CHARGE_TYPE .InstanceChargeType
+INSTANCE_NAME .InstanceName
+FIELDS
 }
 
 # 显示当前配置
@@ -213,126 +176,68 @@ EOF
 
 # 生成符合腾讯云要求的随机密码（12-30位，包含大小写、数字、特殊字符）
 generate_password() {
-    local length=${1:-16}
-    local upper="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    local lower="abcdefghijklmnopqrstuvwxyz"
-    local digits="0123456789"
-    local special="!@#\$%^&*"
-    local all="${upper}${lower}${digits}${special}"
-    
-    # 确保至少包含每种字符
-    local password=""
-    password+="${upper:RANDOM%${#upper}:1}"
-    password+="${lower:RANDOM%${#lower}:1}"
-    password+="${digits:RANDOM%${#digits}:1}"
-    password+="${special:RANDOM%${#special}:1}"
-    
-    # 填充并打乱
-    for ((i=4; i<length; i++)); do
-        password+="${all:RANDOM%${#all}:1}"
-    done
-    echo "$password" | fold -w1 | shuf | tr -d '\n'
+    check_python_installed
+    python3 - "${1:-16}" <<'PY'
+import secrets
+import string
+import sys
+
+length = int(sys.argv[1])
+if not 12 <= length <= 30:
+    sys.exit("密码长度须为 12–30")
+groups = (string.ascii_uppercase, string.ascii_lowercase, string.digits, "!@#$%^&*")
+alphabet = "".join(groups)
+while True:
+    password = "".join(secrets.choice(alphabet) for _ in range(length))
+    if all(any(char in group for char in password) for group in groups):
+        print(password)
+        break
+PY
 }
 
-# 初始化密码文件
-init_password_file() {
-    if [[ ! -f "$CVM_PASSWORD_FILE" ]]; then
-        echo '{}' > "$CVM_PASSWORD_FILE"
-        chmod 600 "$CVM_PASSWORD_FILE"
+# 默认 profile 保留旧位置，其他 profile 不会误用默认账号的实例密码/IP。
+password_file_path() {
+    local profile
+    profile=$(tccli_profile) || return $?
+    if [[ -n "${TENCENT_CVM_PASSWORD_FILE:-}" ]]; then
+        printf '%s\n' "$TENCENT_CVM_PASSWORD_FILE"
+    elif [[ "$profile" == default ]]; then
+        printf '%s\n' "$HOME/.tencent_cvm_passwords"
+    else
+        printf '%s\n' "$HOME/.tencent-cvm/$profile/passwords.json"
     fi
 }
 
-# 保存实例密码
+instance_store() {
+    check_python_installed
+    local store_file
+    store_file=$(password_file_path) || return $?
+    CVM_STORE_FILE="$store_file" python3 "$CVM_COMMON_DIR/instance_store.py" "$@"
+}
+
+init_password_file() { instance_store init; }
+
 save_instance_password() {
-    local instance_id="$1" password="$2" host="${3:-}" region="${4:-}"
-    init_password_file
-    
-    local current_data instance_info new_data
-    current_data=$(cat "$CVM_PASSWORD_FILE" 2>/dev/null || echo '{}')
-    
-    instance_info=$(jq -n \
-        --arg pwd "$password" \
-        --arg host "$host" \
-        --arg region "$region" \
-        --arg created "$(date '+%Y-%m-%d %H:%M:%S')" \
-        '{password: $pwd, host: $host, region: $region, created_at: $created}')
-    
-    new_data=$(echo "$current_data" | jq --arg id "$instance_id" --argjson info "$instance_info" '. + {($id): $info}')
-    echo "$new_data" > "$CVM_PASSWORD_FILE"
-    
-    success "实例 $instance_id 密码已保存"
-    info "密码: $password"
+    local instance_id="$1" password="$2" host="${3:-}" region="${4:-}" user="${5:-}"
+    printf '%s' "$password" | instance_store save --id "$instance_id" --host "$host" --region "$region" --user "$user" || return $?
+    success "实例 $instance_id 连接信息已保存在本地（密码不回显）"
 }
 
-# 更新实例 IP
+save_instance_connection() {
+    instance_store connect --id "$1" --host "${2:-}" --region "${3:-}" --user "${4:-}"
+}
+
 update_instance_host() {
-    local instance_id="$1" host="$2"
-    [[ ! -f "$CVM_PASSWORD_FILE" ]] && { error "密码文件不存在"; return 1; }
-    
-    local current_data exists new_data
-    current_data=$(cat "$CVM_PASSWORD_FILE")
-    exists=$(echo "$current_data" | jq --arg id "$instance_id" 'has($id)')
-    
-    [[ "$exists" != "true" ]] && { error "实例 $instance_id 不存在"; return 1; }
-    
-    new_data=$(echo "$current_data" | jq --arg id "$instance_id" --arg host "$host" '.[$id].host = $host')
-    echo "$new_data" > "$CVM_PASSWORD_FILE"
-    success "实例 $instance_id IP 已更新为 $host"
+    instance_store host --id "$1" --host "$2" || return $?
+    success "实例 $1 IP 已更新"
 }
 
-# 获取实例密码
-get_instance_password() {
-    local instance_id="$1"
-    [[ ! -f "$CVM_PASSWORD_FILE" ]] && { error "密码文件不存在"; return 1; }
-    
-    local password
-    password=$(jq -r --arg id "$instance_id" '.[$id].password // empty' "$CVM_PASSWORD_FILE")
-    
-    if [[ -z "$password" ]]; then
-        error "未找到实例 $instance_id 的密码"
-        echo "可用实例: $(jq -r 'keys | join(", ")' "$CVM_PASSWORD_FILE")" >&2
-        return 1
-    fi
-    echo "$password"
-}
-
-# 获取实例 IP
-get_instance_host() {
-    local instance_id="$1"
-    [[ ! -f "$CVM_PASSWORD_FILE" ]] && return 1
-    jq -r --arg id "$instance_id" '.[$id].host // empty' "$CVM_PASSWORD_FILE"
-}
-
-# 获取实例完整信息
-get_instance_info() {
-    local instance_id="$1"
-    [[ ! -f "$CVM_PASSWORD_FILE" ]] && { error "密码文件不存在"; return 1; }
-    
-    local info
-    info=$(jq --arg id "$instance_id" '.[$id] // empty' "$CVM_PASSWORD_FILE")
-    [[ -z "$info" || "$info" == "null" ]] && { error "未找到实例 $instance_id"; return 1; }
-    echo "$info"
-}
-
-# 列出所有保存的实例
-list_saved_instances() {
-    [[ ! -f "$CVM_PASSWORD_FILE" ]] && { warn "暂无保存的实例"; return 0; }
-    
-    print_section "已保存的实例"
-    jq -r 'to_entries[] | "  \(.key)  \(.value.host // "-")  \(.value.region // "-")"' "$CVM_PASSWORD_FILE"
-    echo "=================================="
-}
-
-# 删除实例密码记录
-delete_instance_password() {
-    local instance_id="$1"
-    [[ ! -f "$CVM_PASSWORD_FILE" ]] && { error "密码文件不存在"; return 1; }
-    
-    local new_data
-    new_data=$(jq --arg id "$instance_id" 'del(.[$id])' "$CVM_PASSWORD_FILE")
-    echo "$new_data" > "$CVM_PASSWORD_FILE"
-    success "已删除实例 $instance_id"
-}
+get_instance_password() { instance_store get --id "$1" --field password; }
+get_instance_host() { instance_store get --id "$1" --field host; }
+get_instance_info() { instance_store get --id "$1"; }
+list_saved_instances() { instance_store list; }
+delete_instance_password() { instance_store delete --id "$1"; }
+clear_instance_password() { instance_store clear-password --id "$1"; }
 
 #=============================================================================
 # 工具函数
@@ -341,7 +246,9 @@ delete_instance_password() {
 # 用户确认
 confirm() {
     local message="${1:-确认继续?}"
-    read -p "$message [y/N]: " -r response
+    local response=""
+    printf '%s [y/N]: ' "$message" >&2
+    IFS= read -r response || return 1
     [[ "$response" =~ ^[yY]([eE][sS])?$ ]]
 }
 
@@ -362,72 +269,65 @@ EOF
 # API 调用
 #=============================================================================
 
-# 执行 tccli 命令（带错误处理）
+# 认证与 API 始终使用同一 profile；不自行改写 tccli 的凭证优先级。
+tccli_profile() {
+    local profile="${TENCENT_CVM_PROFILE:-${TCCLI_PROFILE:-default}}"
+    [[ "$profile" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || { error "profile 只允许字母、数字、点、下划线、连字符，且以字母或数字开头"; return 2; }
+    printf '%s\n' "$profile"
+}
+
+# 原始 API 调用入口。保留退出码和 stderr，供 DryRun 等特殊返回语义使用。
+run_tccli() {
+    local profile api_timeout="${TENCENT_CVM_API_TIMEOUT:-60}"
+    profile=$(tccli_profile) || return $?
+    [[ "$api_timeout" =~ ^[1-9][0-9]{0,3}$ ]] || { error "TENCENT_CVM_API_TIMEOUT 需要 1–9999 秒整数"; return 2; }
+    local options=(--output json --timeout "$api_timeout")
+    # tccli ignores environment credentials whenever --profile is explicit.
+    # Preserve unattended environment auth when no profile was selected, while
+    # keeping an explicitly selected account consistent for every operation.
+    if [[ -n "${TENCENT_CVM_PROFILE:-}${TCCLI_PROFILE:-}" || -z "${TENCENTCLOUD_SECRET_ID:-}" || -z "${TENCENTCLOUD_SECRET_KEY:-}" ]]; then
+        options+=(--profile "$profile")
+    fi
+    # Native tccli rewrites every profile's configuration on startup. Serialize
+    # all profiles in this HOME; the launcher execs tccli while holding its lock.
+    python3 "$CVM_COMMON_DIR/tccli_locked.py" "$@" "${options[@]}"
+}
+
+show_auth_guidance() {
+    printf '认证需要恢复，当前配置: %s。由智能体在后台恢复原认证来源。\n' "$(tccli_profile)" >&2
+    printf '%s\n' '需要网页登录时创建链接授权会话，并在对话中提供本次官方链接；无需用户执行命令或提供验证码。' >&2
+    printf '%s\n' '已有环境凭证或 SSO 应按原方式恢复；不可达的远程回调需要宿主账号连接能力。' >&2
+}
+
+# 执行 tccli 命令（带错误处理）。调用者必须检查返回码，不自动登录或重试写操作。
 execute_tccli() {
-    local result exit_code error_code error_message
-    
-    result=$(tccli "$@" 2>&1)
-    exit_code=$?
-    
+    local result exit_code=0 error_code error_message
+    result=$(run_tccli "$@") || exit_code=$?
+
     if [[ $exit_code -ne 0 ]]; then
-        error "tccli 命令执行失败"
-        echo "$result" >&2
-        exit 1
+        error "tccli 命令执行失败（退出码 ${exit_code}）"
+        info "按上方原始错误区分认证、权限、参数或网络问题；此退出码本身不表示需要重新登录。变更结果不明时先查询状态。"
+        return "$exit_code"
     fi
-    
-    # 检查 API 错误
-    error_code=$(echo "$result" | jq -r '.Error.Code // empty' 2>/dev/null)
+
+    if ! printf '%s\n' "$result" | jq -e -s 'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1; then
+        error "tccli 未返回有效 JSON 对象，已停止；先检查原始响应和 CLI 兼容性，不自动重新登录或重放变更"
+        return 1
+    fi
+
+    error_code=$(printf '%s\n' "$result" | jq -r '.Error.Code // .Response.Error.Code // empty')
     if [[ -n "$error_code" ]]; then
-        error_message=$(echo "$result" | jq -r '.Error.Message // "未知错误"')
+        error_message=$(printf '%s\n' "$result" | jq -r '.Error.Message // .Response.Error.Message // "未知错误"')
         error "API 错误: [$error_code] $error_message"
-        exit 1
+        case "$error_code" in
+            AuthFailure*) show_auth_guidance ;;
+            UnauthorizedOperation*) info "当前账号缺少本次操作的 CAM 权限；重复登录不会自动补充权限。" ;;
+        esac
+        return 1
     fi
-    
-    echo "$result"
-}
 
-#=============================================================================
-# SSH 连接
-#=============================================================================
-
-# 解析运维连接参数，设置 OPS_HOST 和 OPS_PASSWORD
-resolve_ops_connection() {
-    local instance_id="$1" host="$2" password="$3"
-    
-    OPS_HOST="$host"
-    OPS_PASSWORD="$password"
-    
-    if [[ -n "$instance_id" ]]; then
-        # 获取密码
-        if [[ -z "$OPS_PASSWORD" ]]; then
-            OPS_PASSWORD=$(get_instance_password "$instance_id") || return 1
-        fi
-        # 获取 IP
-        if [[ -z "$OPS_HOST" ]]; then
-            OPS_HOST=$(get_instance_host "$instance_id")
-            if [[ -z "$OPS_HOST" ]]; then
-                error "实例 $instance_id 未设置 IP"
-                echo "请先执行: ./scripts/utils/update-instance-ip.sh --instance-id $instance_id --auto"
-                return 1
-            fi
-        fi
-    fi
-    
-    [[ -z "$OPS_HOST" ]] && { error "缺少目标主机 (--instance-id 或 --host)"; return 1; }
-    [[ -z "$OPS_PASSWORD" ]] && { error "缺少密码 (--instance-id 或 --password)"; return 1; }
-    return 0
-}
-
-# 构建 SSH 命令
-build_ssh_cmd() {
-    local host="$1" password="$2" user="${3:-root}" port="${4:-22}"
-    echo "sshpass -p '$password' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $port $user@$host"
-}
-
-# 构建 SCP 选项
-build_scp_opts() {
-    local port="${1:-22}"
-    echo "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P $port"
+    # SDK/CLI 版本可能保留 Response 包装，统一为业务 JSON。
+    printf '%s\n' "$result" | jq -c 'if .Response | type == "object" then .Response else . end'
 }
 
 # 兼容旧函数名

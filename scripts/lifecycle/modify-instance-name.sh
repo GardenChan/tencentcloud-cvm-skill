@@ -1,47 +1,27 @@
 #!/bin/bash
-# modify-instance-name.sh - 修改腾讯云 CVM 实例名称
-
+set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../common.sh"
-
-show_help() {
-    print_help_header "modify-instance-name.sh" "修改腾讯云 CVM 实例名称"
-    cat <<EOF
-  --instance-id <id>      实例 ID（必需）
-  --name <name>           新名称（必需）
-  --region <region>       地域
-  -h, --help              显示帮助
-
-示例:
-  $0 --instance-id ins-xxx --name "my-web-server"
-  $0 --instance-id ins-xxx --name "prod-api-01"
-
-EOF
-}
-
-check_api_prerequisites
+source "$SCRIPT_DIR/lifecycle-common.sh"
 load_defaults
-
-INSTANCE_ID="" NAME=""
-
+INSTANCE_ID="" NAME="" ASSUME_YES=false
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        --instance-id) INSTANCE_ID="$2"; shift 2 ;;
-        --name)        NAME="$2"; shift 2 ;;
-        --region)      REGION="$2"; shift 2 ;;
-        -h|--help)     show_help; exit 0 ;;
-        *)             error "未知参数: $1"; exit 1 ;;
+    case "$1" in
+        --instance-id) lc_value "$@"; INSTANCE_ID="$2"; shift 2 ;;
+        --name) lc_value "$@"; NAME="$2"; shift 2 ;;
+        --region) lc_value "$@"; REGION="$2"; shift 2 ;;
+        --yes) ASSUME_YES=true; shift ;;
+        -h|--help) printf '%s\n' '用法: modify-instance-name.sh --instance-id <id> --name <name> [--region <region>] [--yes]'; exit 0 ;;
+        *) error "未知参数: $1"; exit 2 ;;
     esac
 done
-
-[[ -z "$INSTANCE_ID" ]] && { error "缺少: --instance-id"; exit 1; }
-[[ -z "$NAME" ]] && { error "缺少: --name"; exit 1; }
+lc_instance "$INSTANCE_ID"
+[[ -n "$NAME" && ${#NAME} -le 128 ]] || { error "名称长度须为 1–128"; exit 2; }
+check_api_prerequisites
 validate_region "$REGION"
-
-info "修改实例名称: $INSTANCE_ID -> $NAME"
-execute_tccli cvm ModifyInstancesAttribute \
-    --region "$REGION" \
-    --InstanceIds "[\"$INSTANCE_ID\"]" \
-    --InstanceName "$NAME" > /dev/null
-
-success "实例名称已修改为: $NAME"
+info "新名称: $NAME"
+lc_confirm "确认修改实例名称？"
+ids=$(jq -cn --arg id "$INSTANCE_ID" '[$id]')
+result=$(execute_tccli cvm ModifyInstancesAttribute --region "$REGION" --InstanceIds "$ids" --InstanceName "$NAME")
+success "修改实例名称请求已提交"
+printf '%s\n' "$result"

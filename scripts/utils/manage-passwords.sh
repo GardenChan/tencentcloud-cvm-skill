@@ -1,77 +1,77 @@
 #!/bin/bash
-# manage-passwords.sh - 管理实例密码存储
-
+# 管理当前 profile 的本地连接记录；密码仅通过终端/文件/标准输入读取。
+set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../common.sh"
-
 show_help() {
-    print_help_header "manage-passwords.sh" "管理实例密码存储"
-    cat <<EOF
-操作:
-  --list                  列出所有实例
-  --show <id>             显示实例详情
-  --add <id>              添加实例密码
-  --delete <id>           删除实例记录
-  --update-ip <id>        更新实例 IP
-
-添加/更新参数:
-  --password <pwd>        密码
-  --host <ip>             IP 地址
-  --region <region>       地域
-
-示例:
-  $0 --list
-  $0 --show ins-xxx
-  $0 --add ins-xxx --password 'xxx' --host 1.2.3.4
-  $0 --delete ins-xxx
-
-EOF
+    cat <<'HELP'
+用法: manage-passwords.sh [操作] [参数]
+操作（一次一个）:
+  --list                列出记录（隐藏密码，JSON）
+  --show <id>           查看连接信息（隐藏密码，JSON）
+  --add <id>            添加/更新密码；默认在终端隐藏输入
+  --delete <id>         删除本地记录，不修改云实例
+  --update-ip <id>      更新本地 host
+参数:
+  --host <host> --region <region> --user <user>
+  --password-file <file> 从文件读取密码
+  --password-stdin      从标准输入读取密码（不要将密码放命令行）
+  --profile <name>      选择账号，与云 API 使用相同 profile
+  --yes                 已确认删除指定记录
+  -h, --help
+HELP
 }
-
-check_jq_installed
-
-ACTION="" INSTANCE_ID="" PASSWORD="" HOST="" REGION=""
-
+ACTION="" INSTANCE_ID="" HOST="" REGION="" LOGIN_USER="" PASSWORD_FILE="" PASSWORD_STDIN=false YES=false
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        --list)      ACTION="list"; shift ;;
-        --show)      ACTION="show"; INSTANCE_ID="$2"; shift 2 ;;
-        --add)       ACTION="add"; INSTANCE_ID="$2"; shift 2 ;;
-        --delete)    ACTION="delete"; INSTANCE_ID="$2"; shift 2 ;;
-        --update-ip) ACTION="update"; INSTANCE_ID="$2"; shift 2 ;;
-        --password)  PASSWORD="$2"; shift 2 ;;
-        --host)      HOST="$2"; shift 2 ;;
-        --region)    REGION="$2"; shift 2 ;;
-        -h|--help)   show_help; exit 0 ;;
-        *)           error "未知参数: $1"; exit 1 ;;
+    case "$1" in
+        --list)
+            [[ -z "$ACTION" ]] || { error "一次只能选择一个操作"; exit 2; }
+            ACTION=list; shift ;;
+        --show|--add|--delete|--update-ip)
+            [[ -z "$ACTION" ]] || { error "一次只能选择一个操作"; exit 2; }
+            require_value "$@"; ACTION="${1#--}"; INSTANCE_ID="$2"; shift 2 ;;
+        --host|--region|--user|--password-file|--profile)
+            require_value "$@"
+            case "$1" in
+                --host) HOST="$2";; --region) REGION="$2";; --user) LOGIN_USER="$2";;
+                --password-file) PASSWORD_FILE="$2";; --profile) export TENCENT_CVM_PROFILE="$2";;
+            esac
+            shift 2 ;;
+        --password-stdin) PASSWORD_STDIN=true; shift ;;
+        --password) error "请改用 --password-file/--password-stdin 或终端隐藏输入，避免密码进入命令历史"; exit 2 ;;
+        --yes) YES=true; shift ;;
+        -h|--help) show_help; exit 0 ;;
+        *) error "未知参数: $1"; exit 2 ;;
     esac
 done
-
-[[ -z "$ACTION" ]] && { error "请指定操作"; show_help; exit 1; }
-
+[[ -n "$ACTION" ]] || { show_help; exit 2; }
+[[ -z "$REGION" ]] || validate_region "$REGION"
 case "$ACTION" in
-    list)
-        list_saved_instances
-        ;;
-    show)
-        [[ -z "$INSTANCE_ID" ]] && { error "缺少实例 ID"; exit 1; }
-        info=$(get_instance_info "$INSTANCE_ID") || exit 1
-        print_section "实例 $INSTANCE_ID"
-        echo "$info" | jq -r '"  密码: \(.password)\n  IP: \(.host // "未设置")\n  地域: \(.region // "未设置")\n  创建: \(.created_at // "未知")"'
-        echo "=================================="
-        ;;
-    add)
-        [[ -z "$INSTANCE_ID" ]] && { error "缺少实例 ID"; exit 1; }
-        [[ -z "$PASSWORD" ]] && { error "缺少 --password"; exit 1; }
-        save_instance_password "$INSTANCE_ID" "$PASSWORD" "$HOST" "$REGION"
-        ;;
-    update)
-        [[ -z "$INSTANCE_ID" ]] && { error "缺少实例 ID"; exit 1; }
-        [[ -z "$HOST" ]] && { error "缺少 --host"; exit 1; }
-        update_instance_host "$INSTANCE_ID" "$HOST"
-        ;;
+    list) list_saved_instances ;;
+    show) get_instance_info "$INSTANCE_ID" ;;
     delete)
-        [[ -z "$INSTANCE_ID" ]] && { error "缺少实例 ID"; exit 1; }
-        confirm "确认删除 $INSTANCE_ID?" && delete_instance_password "$INSTANCE_ID"
-        ;;
+        if [[ "$YES" != true ]]; then
+            confirm "删除当前 profile $(tccli_profile) 的本地记录 $INSTANCE_ID?" || exit 1
+        fi
+        delete_instance_password "$INSTANCE_ID" ;;
+    update-ip)
+        [[ -n "$HOST" ]] || { error "缺少 --host"; exit 2; }
+        update_instance_host "$INSTANCE_ID" "$HOST" ;;
+    add)
+        [[ -z "$PASSWORD_FILE" || "$PASSWORD_STDIN" != true ]] || { error "密码输入方式冲突"; exit 2; }
+        PASSWORD=""
+        if [[ -n "$PASSWORD_FILE" ]]; then
+            PASSWORD=$(cat -- "$PASSWORD_FILE")
+        elif [[ "$PASSWORD_STDIN" == true ]]; then
+            PASSWORD=$(cat)
+        elif [[ -t 0 ]]; then
+            printf '实例密码: ' >&2
+            IFS= read -r -s PASSWORD
+            printf '\n' >&2
+        else
+            error "无交互终端，请使用 --password-file 或 --password-stdin"; exit 2
+        fi
+        [[ -n "$PASSWORD" ]] || { error "密码不能为空"; exit 2; }
+        save_instance_password "$INSTANCE_ID" "$PASSWORD" "$HOST" "$REGION" "$LOGIN_USER"
+        unset PASSWORD ;;
 esac

@@ -1,5 +1,6 @@
 #!/bin/bash
 # show-defaults.sh - 显示当前默认配置
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../common.sh"
@@ -25,8 +26,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 load_defaults
+PROFILE=$(tccli_profile)
 
 print_section "当前默认配置"
+printf '账号配置: %s (TENCENT_CVM_PROFILE > TCCLI_PROFILE > default)\n' "$PROFILE"
 cat <<EOF
 地域:       ${REGION:-未设置}  (TENCENT_CVM_DEFAULT_REGION)
 可用区:     ${ZONE:-未设置}  (TENCENT_CVM_DEFAULT_ZONE)
@@ -42,9 +45,11 @@ EOF
 echo "=================================="
 
 print_section "密码存储"
+CVM_PASSWORD_FILE=$(password_file_path)
 echo "文件: $CVM_PASSWORD_FILE"
 if [[ -f "$CVM_PASSWORD_FILE" ]]; then
-    count=$(jq 'keys | length' "$CVM_PASSWORD_FILE")
+    check_jq_installed
+    count=$(list_saved_instances | jq 'keys | length') || exit $?
     echo "已保存: $count 个实例"
 else
     echo "已保存: 0 个实例"

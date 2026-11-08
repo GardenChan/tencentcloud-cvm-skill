@@ -1,63 +1,36 @@
 #!/bin/bash
-# terminate-instance.sh - 销毁腾讯云 CVM 实例
-
+set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../common.sh"
-
-show_help() {
-    print_help_header "terminate-instance.sh" "销毁腾讯云 CVM 实例"
-    cat <<EOF
-  --instance-id <id>      实例 ID（必需）
-  --region <region>       地域
-  --force                 跳过确认
-  -h, --help              显示帮助
-
-警告: 此操作不可逆！
-
-示例:
-  $0 --instance-id ins-xxx
-
-EOF
-}
-
-check_api_prerequisites
+source "$SCRIPT_DIR/lifecycle-common.sh"
 load_defaults
-
-INSTANCE_ID="" FORCE=false
-
+INSTANCE_ID="" ASSUME_YES=false WAIT=false TIMEOUT=300 FORCE=false STOPPED_MODE=KEEP_CHARGING
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        --instance-id) INSTANCE_ID="$2"; shift 2 ;;
-        --region)      REGION="$2"; shift 2 ;;
-        --force)       FORCE=true; shift ;;
-        -h|--help)     show_help; exit 0 ;;
-        *)             error "未知参数: $1"; exit 1 ;;
+    case "$1" in
+        --instance-id) lc_value "$@"; INSTANCE_ID="$2"; shift 2 ;;
+        --region) lc_value "$@"; REGION="$2"; shift 2 ;;
+        --yes) ASSUME_YES=true; shift ;;
+        --wait) WAIT=true; shift ;;
+        --timeout) lc_value "$@"; TIMEOUT="$2"; shift 2 ;;
+        -h|--help)
+            cat <<'HELP'
+用法: terminate-instance.sh --instance-id <id> [--region <region>] [--yes] [--wait] [--timeout 300]
+销毁实例（不可逆，可能丢失数据）。--yes 表示已经批准本次操作；否则先展示目标并确认一次。
+HELP
+            exit 0 ;;
+        *) error "未知参数: $1"; exit 2 ;;
     esac
 done
-
-[[ -z "$INSTANCE_ID" ]] && { error "缺少: --instance-id"; exit 1; }
+lc_instance "$INSTANCE_ID"
+[[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || { error "--timeout 需要正整数"; exit 2; }
+check_api_prerequisites
 validate_region "$REGION"
+ids=$(jq -cn --arg id "$INSTANCE_ID" '[$id]')
+ARGS=(--region "$REGION" --InstanceIds "$ids")
 
-# 危险操作确认
-echo ""
-warn "========== 危险操作 =========="
-warn "即将销毁: $INSTANCE_ID"
-warn "地域: $REGION"
-warn "此操作不可逆！"
-warn "=============================="
-echo ""
-
-if [[ "$FORCE" != "true" ]]; then
-    confirm "确认销毁?" || { info "已取消"; exit 0; }
-    
-    read -p "请输入实例 ID 确认: " -r confirm_id
-    [[ "$confirm_id" != "$INSTANCE_ID" ]] && { error "ID 不匹配，已取消"; exit 1; }
-fi
-
-info "销毁实例 $INSTANCE_ID ..."
-execute_tccli cvm TerminateInstances --region "$REGION" --InstanceIds "[\"$INSTANCE_ID\"]" > /dev/null
-
-success "销毁请求已发送"
-
-# 删除本地密码记录
-delete_instance_password "$INSTANCE_ID" 2>/dev/null || true
+lc_confirm "确认销毁实例（不可逆，可能丢失数据）？"
+result=$(execute_tccli cvm TerminateInstances "${ARGS[@]}")
+success "销毁实例（不可逆，可能丢失数据）请求已提交，尚未确认完成"
+printf '%s\n' "$result"
+lc_wait "$result" ABSENT
+info "本地连接记录保留；确认销毁完成后可显式清理"

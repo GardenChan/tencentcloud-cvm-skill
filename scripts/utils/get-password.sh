@@ -1,44 +1,21 @@
 #!/bin/bash
-# get-password.sh - 获取实例密码
-
+# 默认显示脱敏连接信息，明文密码仅在显式 --reveal 时输出。
+set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../common.sh"
-
-show_help() {
-    print_help_header "get-password.sh" "获取已保存的实例密码"
-    cat <<EOF
-  --instance-id <id>      实例 ID（必需）
-  --show-all              显示完整信息
-  -h, --help              显示帮助
-
-示例:
-  $0 --instance-id ins-xxx
-  $0 --instance-id ins-xxx --show-all
-
-EOF
-}
-
-check_jq_installed
-
-INSTANCE_ID="" SHOW_ALL=false
-
+INSTANCE_ID="" REVEAL=false
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        --instance-id) INSTANCE_ID="$2"; shift 2 ;;
-        --show-all)    SHOW_ALL=true; shift ;;
-        -h|--help)     show_help; exit 0 ;;
-        *)             error "未知参数: $1"; exit 1 ;;
+    case "$1" in
+        --instance-id|--profile)
+            require_value "$@"
+            if [[ "$1" == --profile ]]; then export TENCENT_CVM_PROFILE="$2"; else INSTANCE_ID="$2"; fi
+            shift 2 ;;
+        --reveal) REVEAL=true; shift ;;
+        --show-all) shift ;;
+        -h|--help)
+            printf '%s\n' '用法: get-password.sh --instance-id <id> [--profile <name>] [--reveal]' '默认只显示连接信息（JSON）；--reveal 输出密码，仅在自己的终端使用。'; exit 0 ;;
+        *) error "未知参数: $1"; exit 2 ;;
     esac
 done
-
-[[ -z "$INSTANCE_ID" ]] && { error "缺少: --instance-id"; exit 1; }
-
-if [[ "$SHOW_ALL" == "true" ]]; then
-    info=$(get_instance_info "$INSTANCE_ID") || exit 1
-    print_section "实例 $INSTANCE_ID"
-    echo "$info" | jq -r '"  密码: \(.password)\n  IP: \(.host // "未设置")\n  地域: \(.region // "未设置")"'
-    echo "=================================="
-else
-    password=$(get_instance_password "$INSTANCE_ID") || exit 1
-    echo "$password"
-fi
+[[ -n "$INSTANCE_ID" ]] || { error "缺少 --instance-id"; exit 2; }
+if [[ "$REVEAL" == true ]]; then get_instance_password "$INSTANCE_ID"; else get_instance_info "$INSTANCE_ID"; fi
